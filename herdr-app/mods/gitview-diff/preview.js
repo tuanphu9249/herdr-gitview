@@ -2,7 +2,8 @@
 // markdown rendered, images and SVGs drawn. One side of the file comes from
 // the engine (`json file`): the side the diff's new version comes from (the
 // worktree for a change, the index for a staged one, the commit for a
-// history file, the worktree for the branch's diff); a deleted file shows
+// history file, the worktree for the branch's diff, HEAD for the committed
+// one); a deleted file shows
 // its old version; a changed image shows before and after.
 //
 // Images are written by the engine into the cache under the app home
@@ -37,8 +38,8 @@ export function previewKind(view) {
 function sidesOf(v, kind) {
   const [after, before] = v.commit
     ? [`commit:${v.commit}`, `parent:${v.commit}`]
-    : v.section === "branch"
-      ? ["worktree", v.base?.merge_base ? `base:${v.base.merge_base}` : null]
+    : v.section === "branch" || v.section === "committed"
+      ? [v.section === "committed" ? (v.head ? `commit:${v.head}` : "head") : "worktree", v.base?.merge_base ? `base:${v.base.merge_base}` : null]
       : v.cached
         ? ["index", "head"]
         : ["worktree", "index"];

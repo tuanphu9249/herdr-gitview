@@ -40,6 +40,14 @@ pub struct ShowReq {
     /// a base is resolved, so both panes always name the same one.
     #[serde(default)]
     pub base: Option<BranchBase>,
+    /// Branch scope: the new side is HEAD, not the working tree (the
+    /// branch's commits only: merge-base → HEAD).
+    #[serde(default)]
+    pub to_head: bool,
+    /// With `to_head`: the HEAD sha the list was built from, so the diff
+    /// does not follow a HEAD that moved since. `None`: the live HEAD.
+    #[serde(default)]
+    pub head_sha: Option<String>,
 }
 
 impl ShowReq {
@@ -58,6 +66,8 @@ impl ShowReq {
             kind,
             commit: None,
             base: None,
+            to_head: false,
+            head_sha: None,
         }
     }
 }
@@ -312,6 +322,8 @@ mod tests {
                     label: "origin/main".into(),
                     merge_base: "def456".into(),
                 }),
+                to_head: true,
+                head_sha: Some("0123456789abcdef0123456789abcdef01234567".into()),
             }),
             ToPreview::Scroll { delta: -3 },
             ToPreview::Page {

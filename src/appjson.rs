@@ -512,6 +512,11 @@ struct DiffOut {
     binary: bool,
     /// Of what the rows are made of; `--unless` it: `{same, hash}`.
     hash: String,
+    /// `"head"` when the new side was HEAD (`--to head`). A binary from
+    /// before that flag leaves it out (it ignores the flag), which is how the
+    /// mod knows the rows are not what it asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'static str>,
 }
 
 // ---- status -------------------------------------------------------------------
@@ -621,6 +626,26 @@ fn diff(a: &Args) -> Result<Value> {
             merge_base: merge_base.to_string(),
         });
     }
+    // `--to head`: the branch's commits only (merge-base → HEAD), with the
+    // working tree left out. Takes the branch pair above.
+    match a.value("to") {
+        None => {}
+        Some("head") if req.scope == Scope::Branch && req.commit.is_none() => req.to_head = true,
+        Some("head") => anyhow::bail!("--to head needs --merge-base and --base, and no --commit"),
+        Some(other) => anyhow::bail!("--to {other}: only `head` is known"),
+    }
+    // `--head <sha>` (with `--to head`): the HEAD the list was built from,
+    // not the live one. Hex only, a full object name: it ends up as a git
+    // rev, so nothing that reads as an option, a range or a ref name.
+    if let Some(sha) = a.value("head") {
+        if !req.to_head {
+            anyhow::bail!("--head needs --to head");
+        }
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            anyhow::bail!("--head {sha}: not a full commit sha");
+        }
+        req.head_sha = Some(sha.to_ascii_lowercase());
+    }
     let (old, new) = crate::preview::worker::load_sides(&repo, &req).map_err(anyhow::Error::msg)?;
     // Everything the rows are made of; the same hash, the same rows.
     let hash = crate::appfile::digest(&[
@@ -676,6 +701,7 @@ fn diff(a: &Args) -> Result<Value> {
         empty: doc.is_empty,
         binary: doc.binary,
         hash,
+        to: req.to_head.then_some("head"),
     })
 }
 

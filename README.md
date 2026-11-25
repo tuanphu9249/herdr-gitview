@@ -44,6 +44,18 @@ line you're on. You never leave Herdr.
   and diffs. `w` filters it to the commits your branch added.
 - **Knows what your branch was cut from** - branch scope diffs against the
   branch you actually branched off ([Branch scope](TUI.md#branch-scope)).
+- **Three views** (this fork) - the header's menu or `w` switches between
+  **Uncommitted** (HEAD to the working tree; the only view that stages,
+  discards and commits), **Branch** (everything the branch differs by,
+  committed or not) and **Committed** (the commits only, as a reviewer sees
+  them). Branch and Committed compare against a base you pick (`b`, or the
+  base label): the default branch, any branch, tag or recent commit, kept
+  per repo. With an open pull request, Committed uses the PR's base and
+  shows `#n` (needs `gh`).
+- **Opens no diff on its own** (this fork) - showing the panel or moving
+  with `j`/`k` opens nothing. A click on a file or `space` opens the diff;
+  an open diff pane follows the selection. A click on a section header
+  folds the section.
 - **Review notes to any agent** - select diff lines, write a note under them,
   and send the batch into the input of any agent in Herdr. It types, without
   the clipboard; you decide when to press enter.
@@ -82,14 +94,14 @@ window to "add the mod at github.com/ChmaraX/herdr-gitview".
 
 1. **Open it.** Press **Changes** in the tab bar, or `cmd-shift-g`. The
    space's changed files show in the panel.
-2. **Browse.** Click a file, or `j`/`k`: its diff opens in a full-height pane
+2. **Browse.** Click a file (or `space`): its diff opens in a full-height pane
    beside the panel and follows your selection.
 3. **Edit.** `Enter` turns the diff pane into nvim at the line. `:q`, and
    you're back on the diff.
 4. **Stage & commit.** `s` to stage (the file moves up), `x` to discard (asks
    first), `c` to write the commit message, `enter` to commit.
-5. **See what your branch did.** `w` switches to "vs the base branch"; `l`
-   opens the log filtered to your branch's commits.
+5. **See what your branch did.** `w` switches to the Branch and Committed
+   views; `l` opens the log filtered to your branch's commits.
 6. **Review for your agent.** In the diff, drag over lines (or `v` +
    `j`/`k`), `a` to write a note, `enter` to save it. `p` → pick an agent →
    the notes land in its input.
@@ -102,12 +114,14 @@ The footer shows the keys that work right now; `?` lists them all.
 | --- | --- | --- |
 | `cmd-shift-g` | anywhere | Show or hide the Changes panel with gitview (Linux: `ctrl-alt-shift-g`) |
 | `cmd-g` | anywhere | gitview in a tab of its own; again to go back (Linux: `ctrl-alt-g`) |
-| `j` / `k`, arrows | list, diff | Move; in the list the diff follows |
+| `j` / `k`, arrows | list, diff | Move; in the list an open diff follows |
 | `enter` | list, diff | Open the file in the editor at the line |
 | `s` / `u` / `x` | list, diff | Stage, unstage, discard |
 | `c` | list | Write the commit message (`enter` commits, `shift+enter` new line) |
 | `t` | list | Flat or tree |
-| `w` | list | Uncommitted or vs the base branch |
+| `w` | list | Next view: Uncommitted, Branch, Committed |
+| `b` | list | Pick the base (Branch and Committed) |
+| `space` | list | Open the selected file's diff |
 | `l` / `n` | list | History / notes |
 | `J` / `K` | diff | Next / previous file |
 | `v`, `a` | diff | Select lines, write a note |

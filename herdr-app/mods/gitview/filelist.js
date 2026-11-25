@@ -13,18 +13,39 @@ const isAt = (row, spot) =>
 
 export class FileList {
   // status: the engine's `status` (or `{sections}` for a commit);
-  // where: {root, on, base, commit?, short?, subject?}.
-  constructor(status, where) {
+  // where: {root, on, base, commit?, short?, subject?};
+  // folded: the ids of the sections whose rows are hidden (the caller keeps
+  // the set, so a rebuilt list folds as the one before did).
+  constructor(status, where, folded = new Set()) {
     this.status = status;
     this.where = where;
     this.selected = null; // {section, path}
     this.collapsed = new Set();
+    this.folded = folded;
     this.rows = [];
+    this.order = [];
   }
 
   rebuild(tree) {
     this.tree = tree;
-    this.rows = listRows(this.status, { tree, collapsed: this.collapsed });
+    this.rows = listRows(this.status, { tree, collapsed: this.collapsed, folded: this.folded });
+    // Every row as it would show with no section folded: j/k from a row a
+    // fold hid still know where it was.
+    this.order = this.folded.size ? listRows(this.status, { tree, collapsed: this.collapsed }) : this.rows;
+  }
+
+  // Fold or unfold a section (a click on its header). The selection stays
+  // where it was, hidden or not.
+  toggleSection(id) {
+    if (this.folded.has(id)) this.folded.delete(id);
+    else this.folded.add(id);
+    this.rebuild(this.tree);
+  }
+
+  // Whether the spot is a file or folder of the status now.
+  holds(spot) {
+    const files = this.status?.sections.find((s) => s.id === spot.section)?.files ?? [];
+    return spot.path.endsWith("/") ? files.some((f) => f.path.startsWith(spot.path)) : files.some((f) => f.path === spot.path);
   }
 
   // A new status for the same list: the same row, else the same file in its
@@ -36,7 +57,8 @@ export class FileList {
     this.status = status;
     this.where = where;
     this.rebuild(this.tree);
-    if (!was || this.row()) return;
+    // (A row a fold hides is still the selection.)
+    if (!was || this.row() || (this.folded.has(was.section) && this.holds(was))) return;
     const folder = was.path.endsWith("/");
     const moved = folder ? null : this.rows.find((r) => r.kind === "file" && r.file.path === was.path);
     const wanted = (r) => (folder ? r.kind !== "header" : r.kind === "file");
@@ -107,27 +129,38 @@ export class FileList {
     return this.rows.find((r) => r.kind === "file" && r.file.path === what) ?? null;
   }
 
-  // A file row, unfolding the folders above it in tree mode.
-  findFile(path, section) {
+  // A file row, unfolding the folders above it in tree mode, and its
+  // section when folded. `keepFolds`: a section that's folded stays so: the
+  // file is there (its row, as it would show), just not shown.
+  findFile(path, section, { keepFolds = false } = {}) {
     const match = (r) => r.kind === "file" && r.file.path === path && (!section || r.section.id === section);
     let row = this.rows.find(match);
-    if (!row && this.tree) {
-      const hidden = listRows(this.status, { tree: true }).find(match);
+    if (!row) {
+      const hidden = listRows(this.status, { tree: this.tree }).find(match);
       if (!hidden) return null;
-      for (const d of parentDirs(hidden)) this.collapsed.delete(d);
+      if (keepFolds && this.folded.has(hidden.section.id)) return hidden;
+      if (this.tree) for (const d of parentDirs(hidden)) this.collapsed.delete(d);
+      this.folded.delete(hidden.section.id);
       this.rebuild(this.tree);
       row = this.rows.find(match);
     }
     return row ?? null;
   }
 
-  // The next/previous selectable row (folders count, headers don't).
+  // The next/previous selectable row (folders count, headers don't; rows
+  // of a folded section don't show, so they're skipped).
   step(delta) {
     const rows = this.rows.filter((r) => r.kind !== "header");
     if (!rows.length) return null;
     const at = rows.findIndex((r) => isAt(r, this.selected));
-    if (at < 0) return rows[delta > 0 ? 0 : rows.length - 1];
-    return rows[Math.min(rows.length - 1, Math.max(0, at + delta))];
+    if (at >= 0) return rows[Math.min(rows.length - 1, Math.max(0, at + delta))];
+    // Not shown: a folded section hides it. On from where it sits.
+    const all = this.order.filter((r) => r.kind !== "header");
+    const was = all.findIndex((r) => isAt(r, this.selected));
+    if (was < 0) return rows[delta > 0 ? 0 : rows.length - 1];
+    const shown = new Set(rows.map((r) => r.key));
+    const next = delta > 0 ? all.slice(was + 1).find((r) => shown.has(r.key)) : all.slice(0, was).findLast((r) => shown.has(r.key));
+    return next ? rows.find((r) => r.key === next.key) : rows[delta > 0 ? rows.length - 1 : 0];
   }
 
   edge(last) {
@@ -159,6 +192,6 @@ export class FileList {
     const order = fileOrder(this.status, this.tree);
     const at = order.findIndex((r) => r.file.path === view.path && r.section.id === view.section);
     const next = at >= 0 ? order[at + delta] : null;
-    return next ? this.findFile(next.file.path, next.section.id) : null;
+    return next ? this.findFile(next.file.path, next.section.id) : null; // (a folded section opens)
   }
 }

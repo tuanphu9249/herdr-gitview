@@ -279,6 +279,107 @@ fn log_commit_files_and_a_commits_diff() {
     assert_eq!(root["rows"].as_array().unwrap().len(), 2);
 }
 
+/// The rows' markers + text of a `diff` reply: `["-two", "+2"]`.
+fn marks(diff: &Value) -> Vec<String> {
+    diff["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["m"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn diff_to_head_shows_the_branchs_commits_and_leaves_the_working_tree_out() {
+    let repo = fixture("json-diff-to-head");
+    let d = &repo.dir;
+    write(d, "gone.txt", "bye\n");
+    write(d, "old.txt", "a\nb\nc\nd\ne\nf\n");
+    common::git(d, &["add", "."]);
+    common::git(d, &["commit", "-q", "-m", "more base"]);
+    let mb = git_out(d, &["rev-parse", "HEAD"]).trim().to_string();
+    common::git(d, &["checkout", "-q", "-b", "feature"]);
+    // Two commits: modify, add, delete, rename.
+    write(d, "base.txt", "one\n2\n");
+    write(d, "added.txt", "new\n");
+    common::git(d, &["add", "."]);
+    common::git(d, &["commit", "-q", "-m", "one"]);
+    common::git(d, &["rm", "-q", "gone.txt"]);
+    common::git(d, &["mv", "old.txt", "new.txt"]);
+    write(d, "new.txt", "a\nb\nc\nd\ne\nF\n");
+    common::git(d, &["add", "."]);
+    common::git(d, &["commit", "-q", "-m", "two"]);
+    // Uncommitted, on a file the commits changed and on one they did not.
+    write(d, "base.txt", "one\n2\nUNCOMMITTED\n");
+    write(d, "added.txt", "new\nUNCOMMITTED\n");
+
+    let diff = |extra: &[&str]| {
+        let mut args = vec!["diff", "--merge-base", &mb, "--base", "main"];
+        args.extend_from_slice(extra);
+        gv(d, &args)
+    };
+    // Committed only: base.txt "two" → "2"; the worktree's third line is absent.
+    let committed = diff(&["--path", "base.txt", "--kind", "modified", "--to", "head"]);
+    assert_eq!(marks(&committed), [" one", "-two", "+2"]);
+    assert_eq!(committed["to"], "head");
+    // The same call without `--to` is the branch view's: it has the edit.
+    let branch = diff(&["--path", "base.txt", "--kind", "modified"]);
+    assert_eq!(marks(&branch), [" one", "-two", "+2", "+UNCOMMITTED"]);
+    assert!(branch.get("to").is_none());
+    // Added: all new, without the uncommitted second line.
+    let added = diff(&["--path", "added.txt", "--kind", "added", "--to", "head"]);
+    assert_eq!(marks(&added), ["+new"]);
+    // Deleted: the old side only.
+    let gone = diff(&["--path", "gone.txt", "--kind", "deleted", "--to", "head"]);
+    assert_eq!(marks(&gone), ["-bye"]);
+    // Renamed with a change: old path at the merge-base, new path at HEAD.
+    let moved = diff(&[
+        "--path", "new.txt", "--orig", "old.txt", "--kind", "renamed", "--to", "head",
+    ]);
+    let m = marks(&moved);
+    assert!(m.contains(&"-f".to_string()) && m.contains(&"+F".to_string()), "{m:?}");
+    // A file only the working tree changed: nothing to show.
+    write(d, "committed-clean.txt", "x\n"); // untracked, not in HEAD
+    let none = diff(&["--path", "committed-clean.txt", "--kind", "added", "--to", "head"]);
+    assert_eq!(none["empty"], true);
+
+    // The file list for the same range: commit-files on `<mb>..HEAD`.
+    let range = format!("{mb}..HEAD");
+    let files = gv(d, &["commit-files", "--sha", &range]);
+    let got: Vec<(&str, &str)> = files["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap(), f["letter"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        [("added.txt", "A"), ("base.txt", "M"), ("gone.txt", "D"), ("new.txt", "R")]
+    );
+
+    // `--head <sha>`: the HEAD the list was built from, after HEAD moved on.
+    let listed = git_out(d, &["rev-parse", "HEAD"]).trim().to_string();
+    write(d, "base.txt", "one\n2\n3\n");
+    common::git(d, &["commit", "-q", "-a", "-m", "three"]);
+    let moved_on = diff(&["--path", "base.txt", "--kind", "modified", "--to", "head"]);
+    assert_eq!(marks(&moved_on), [" one", "-two", "+2", "+3"]);
+    let pinned = diff(&["--path", "base.txt", "--kind", "modified", "--to", "head", "--head", &listed]);
+    assert_eq!(marks(&pinned), [" one", "-two", "+2"]);
+    // Only a full hex sha, only with `--to head`.
+    for bad in ["HEAD", "abc123", "--force", &format!("{listed}^"), &"g".repeat(40)] {
+        let err = gv_err(d, &["diff", "--path", "base.txt", "--merge-base", &mb, "--base", "main", "--to", "head", "--head", bad]);
+        assert!(err.contains("not a full commit sha"), "{bad}: {err}");
+    }
+    let err = gv_err(d, &["diff", "--path", "base.txt", "--merge-base", &mb, "--base", "main", "--head", &listed]);
+    assert!(err.contains("--head needs --to head"), "{err}");
+
+    // Needs the pair, and knows only `head`.
+    let err = gv_err(d, &["diff", "--path", "base.txt", "--to", "head"]);
+    assert!(err.contains("--to head needs"), "{err}");
+    let err = gv_err(d, &["diff", "--path", "base.txt", "--merge-base", &mb, "--base", "main", "--to", "tip"]);
+    assert!(err.contains("only `head`"), "{err}");
+}
+
 /// `git -C dir <args>`'s stdout.
 fn git_out(dir: &Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")

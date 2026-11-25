@@ -41,6 +41,7 @@ const factory = () => el();
 export const div = factory, svg = factory, image = factory, h_flex = factory, v_flex = factory;
 export const Input = { new: factory }, Textarea = { new: factory }, TextView = { new: factory };
 export const InputState = { new: factory }, TextareaState = { new: factory };
+export const Popover = { new: factory }, ScrollHandle = { new: factory };
 export class View {}
 `;
 const url = (src) => `data:text/javascript,${encodeURIComponent(src)}`;

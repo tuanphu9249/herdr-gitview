@@ -47,6 +47,9 @@
 // - "gitview.paneWidth": px: the diff pane's last width (a new one lays out
 //   at it right away).
 // - "gitview.tree": the list shows folders as a tree.
+// - "gitview.bases": {"<machine or ''>:<repo root>": {ref, label}}: the base the
+//   person picked for the Branch view of that repo (bases.js); absent: the
+//   engine's own. The 50 repos written last.
 // - "gitview.own": {<space>: <tab>}: the space's gitview tab (cmd-g).
 // - "gitview.origins": {<space>: <tab>}: where cmd-g was pressed (it goes
 //   back there).
@@ -137,6 +140,20 @@ export function treeMode() {
 
 export function setTreeMode(on) {
   setShared("gitview.tree", Boolean(on));
+}
+
+// The base picked for a repo's Branch view: {ref, label}, or null.
+export function basePick(on, root) {
+  return root ? (shared("gitview.bases") ?? {})[notesKey(on, root)] ?? null : null;
+}
+
+// `pick` null: the engine's own base again.
+export function setBasePick(on, root, pick) {
+  const key = notesKey(on, root);
+  const all = { ...(shared("gitview.bases") ?? {}) };
+  delete all[key];
+  if (pick) all[key] = { ref: pick.ref, label: pick.label };
+  setShared("gitview.bases", Object.fromEntries(Object.entries(all).slice(-50)));
 }
 
 export function origins() {

@@ -12,6 +12,8 @@ import { commitBox, filesHeader, subHeader } from "./chrome.js";
 import { renderRow, rowSize } from "./listview.js";
 import { COMMIT_ROW, commitRow, loadLog, logMove, openCommit, openLog, toggleLogFilter } from "./history.js";
 import { treeMode } from "./shared.js";
+import { emptyText, toggleLabel } from "./views.js";
+import { viewControls } from "./viewbar.js";
 import { editorLabel } from "./nvim.js";
 
 // Enter's label: the editor it starts there (nvim, vim, open, …).
@@ -22,8 +24,9 @@ import { NOTE_ROW, deleteNote, jumpToNote, noteMove, noteRow } from "./notesview
 const down = (v, cx) => v.move(1, cx);
 const up = (v, cx) => v.move(-1, cx);
 const back = (to) => (v, cx) => v.setMode(to, cx);
-// s/u/x and the commit box: the working tree only (not "vs base").
-const worktree = (v) => v.scope === "worktree";
+// s/u/x and the commit box: the views that act on the working tree
+// (views.js `actsOnWork`), not the ones against a base.
+const worktree = (v) => v.viewDef().actsOnWork;
 // 6 px above and below the rows, like the stock panel.
 const padded = (sizes) => [6, ...sizes, 6];
 // Takes the growing space as the rows do, so the commit box and the footer
@@ -33,7 +36,7 @@ const empty = (t, text) => div().flex_1().min_h(0).px(16).py(12).text_color(t.di
 // A list of file rows (the changed files or a commit's).
 function filesBody(v, t, focused, list) {
   const rows = list?.rows ?? [];
-  if (!rows.length) return empty(t, v.error ?? (list ? "No changes" : v.loads.busy() ? "Loading changes…" : "No folder"));
+  if (!rows.length) return empty(t, v.error ?? (list ? (list === v.work ? emptyText(v.viewDef(), list.status.base?.label) : "No changes") : v.loads.busy() ? "Loading changes…" : "No folder"));
   v.scroll.measure(padded(rows.map(rowSize)));
   const ctx = {
     t, selected: list.row()?.key, hover: v.hover, focused, tree: list.tree, inNvim: (row) => v.handedOff(row),
@@ -60,13 +63,14 @@ export const MODES = {
       notes: notes.length,
       loading: v.loads.shown(),
       wide: v.width >= 340,
+      control: viewControls(v, t),
       tree: treeMode(),
       onNotes: (cx) => { v.setMode("notes", cx); cx.notify(); },
       onTree: (cx) => v.toggleTree(cx),
       onLog: (cx) => { openLog(v, cx); cx.notify(); },
     }),
     body: (v, t, focused) => filesBody(v, t, focused, v.work),
-    under: (v, t) => (v.scope === "worktree" && v.work
+    under: (v, t) => (v.viewDef().actsOnWork && v.work
       ? commitBox(t, v.commitInput, v.typing, v.work.status.sections.some((s) => s.id === "staged"), v.commitRunning(), (cx) => v.commit(cx), v.width < 320)
       : null),
     keys: [
@@ -74,12 +78,14 @@ export const MODES = {
       { caps: ["s"], label: "stage", rank: 1, when: worktree, on: { s: (v, cx) => v.rowAction("stage", null, cx) } },
       { caps: ["u"], label: "unstage", rank: 2, when: worktree, on: { u: (v, cx) => v.rowAction("unstage", null, cx) } },
       { caps: ["enter"], label: enterLabel, rank: 3, on: { enter: (v, cx) => v.enter(cx), e: (v, cx) => v.enter(cx) } },
+      { caps: ["space"], label: "diff", on: { space: (v, cx) => v.openDiff(cx) } },
       { caps: ["x"], label: "discard", rank: 4, when: worktree, on: { x: (v, cx) => v.rowAction("discard", null, cx) } },
       { caps: ["c"], label: "commit", rank: 5, when: worktree, on: { c: (v) => worktree(v) && v.commitInput.focus() } },
       { caps: ["l"], label: "history", rank: 6, on: { l: (v, cx) => openLog(v, cx) } },
       { caps: ["t"], label: "tree", rank: 7, on: { t: (v, cx) => v.toggleTree(cx) } },
       { caps: ["n"], label: "notes", rank: 8, on: { n: back("notes") } },
-      { caps: ["w"], label: "uncommitted / vs base", on: { w: (v, cx) => v.toggleScope(cx) } },
+      { caps: ["w"], label: toggleLabel(), on: { w: (v, cx) => v.toggleView(cx) } },
+      { caps: ["b"], label: "base", when: (v) => v.viewDef().usesBase, on: { b: (v, cx) => v.viewDef().usesBase && v.setMenu("base", cx) } },
       { caps: ["h", "right"], label: "fold / unfold a folder", on: { h: (v, cx) => v.fold(true, cx), left: (v, cx) => v.fold(true, cx), right: (v, cx) => v.fold(false, cx) } },
       { caps: ["g", "G"], label: "first / last", on: { g: (v, cx) => v.edge(false, cx), G: (v, cx) => v.edge(true, cx) } },
     ],
@@ -93,7 +99,7 @@ export const MODES = {
       v.commitFiles = list;
       v.scroll.top = 0;
       const first = list.shownFile();
-      if (first) v.select(first, cx);
+      if (first) v.select(first, cx, { open: false });
     },
     header: (v, t) => {
       const c = v.commitFiles;
@@ -104,6 +110,7 @@ export const MODES = {
     keys: [
       { caps: ["j", "k"], label: "move", on: { j: down, down, k: up, up } },
       { caps: ["enter"], label: enterLabel, rank: 1, on: { enter: (v, cx) => v.enter(cx), e: (v, cx) => v.enter(cx) } },
+      { caps: ["space"], label: "diff", on: { space: (v, cx) => v.openDiff(cx) } },
       { caps: ["t"], label: "tree", rank: 2, on: { t: (v, cx) => v.toggleTree(cx) } },
       { caps: ["escape"], label: "back", rank: 3, on: { escape: back("log"), h: back("log"), left: back("log") } },
     ],
@@ -118,7 +125,7 @@ export const MODES = {
     },
     header: (v, t) => subHeader(t, {
       title: "History",
-      detail: v.history.filter ? `since ${v.work?.where.base?.label ?? "the base"}` : v.work?.status.branch ?? "",
+      detail: v.history.filter ? `since ${v.pick()?.label ?? v.work?.where.base?.label ?? "the base"}` : v.work?.status.branch ?? "",
       pill: v.history.filter ? "branch" : "all",
       onPill: (cx) => { toggleLogFilter(v, cx); cx.notify(); },
       loading: v.loads.shown(),

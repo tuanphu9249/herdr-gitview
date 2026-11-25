@@ -761,6 +761,8 @@ fn show_for_row(app: &App, row: usize) -> Option<ShowReq> {
         kind: e.kind,
         commit,
         base,
+        to_head: false,
+        head_sha: None,
     })
 }
 

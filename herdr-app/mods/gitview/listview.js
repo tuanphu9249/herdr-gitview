@@ -27,6 +27,7 @@ function actions(t, row, what, ctx) {
     .children(opsFor(row.section.id).map((a) => iconButton(t, `${a}-${row.key}`, ACTION[a].icon, ACTION[a].tip + what, (cx) => ctx.onAction(a, row, cx))));
 }
 
+// A header (a section's) folds on a click, as a folder does.
 // ctx: {t, selected (the selected row's key), hover, focused, tree, inNvim(row), onClick(row, event, cx),
 // onHover(row, hovered, cx), onAction(op, row, cx)}
 export function renderRow(row, ctx) {
@@ -43,7 +44,11 @@ export function renderRow(row, ctx) {
       .pr(4)
       .gap(6)
       .items_center()
+      .cursor_pointer()
       .on_hover((h, cx) => ctx.onHover(row, h, cx))
+      // A click folds or unfolds the section; its buttons (iconButton) stop their clicks.
+      .on_click((e, cx) => ctx.onClick(row, e, cx))
+      .child(icon(`chevron-${row.folded ? "right" : "down"}`, 12, t.dim))
       .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.muted).child(row.section.title.toUpperCase()))
       .child(div().flex_none().px(5).rounded(8).bg(t.raised).text_size(10.5).text_color(t.muted).child(String(row.section.files.length)))
       .when(hot && tools, (e) => e.child(actions(t, row, " all", ctx)));

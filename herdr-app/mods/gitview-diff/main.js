@@ -18,7 +18,7 @@ import { v_flex, TextareaState } from "gpui-base";
 import { focused, props, setShared, settings, shared, spaces, theme } from "herdr";
 import { Tracer, run } from "./telemetry.js";
 import { gv, message } from "./engine.js";
-import { diffArgs, isDark, sameFile, sameShown } from "./model.js";
+import { baseSection, diffArgs, isDark, sameFile, sameShown } from "./model.js";
 import { allowed, confirmDiscard, sendNotes, takeDiscard } from "./actions.js";
 import { addNote, answerIn, ask, cursorIn, liveView, notesKey, notesOf, previewOff, removeNotes, setCursor, setPreviewOff, viewIn } from "./shared.js";
 import { diffPane } from "./layout.js";
@@ -61,9 +61,11 @@ const KEYS = [
 const NOTE_KEYS = [{ caps: ["enter"], label: "save the note", rank: 1, on: {} }, { caps: ["escape"], label: "cancel", rank: 2, on: {} }];
 
 // Notes are written on staged or unstaged changes, as the TUI's: the side
-// (cached or not) of a view that takes them, null for a commit's or the
-// branch's diff.
-const noteSide = (v) => (!v || v.commit || v.section === "branch" ? null : Boolean(v.cached));
+// (cached or not) of a view that takes them, null for a commit's or a
+// base's diff (the Branch and Committed views).
+const noteSide = (v) => (!v || v.commit || baseSection(v.section) ? null : Boolean(v.cached));
+
+const OLD_ENGINE = "the Committed view needs a newer herdr-gitview binary (its diff can't end at HEAD): run herdr-app/install.sh";
 
 export default class GitDiff extends View {
   init(_props, cx) {
@@ -256,6 +258,9 @@ export default class GitDiff extends View {
       let diff;
       try {
         diff = await gv(again && this.diff.hash ? diffArgs(view, { dark: this.dark, unfold: this.unfold, unless: this.diff.hash }) : args);
+        // An engine from before `--to head` ignores it and shows the base
+        // against the working tree: not what this view says. Say so.
+        if (view.to && !diff.same && diff.to !== view.to) throw new Error(OLD_ENGINE);
         // The rows shown are still right; the cursor record follows the
         // file anyway (back from another file's Preview, the same diff).
         if (diff.same) return this.publishCursor();
@@ -442,7 +447,7 @@ export default class GitDiff extends View {
     const v = this.view;
     if (!v) return;
     if (this.inPreview()) return this.flash.set("notes work in Diff: m switches");
-    if (v.commit || v.section === "branch") return this.flash.set("notes work on staged/unstaged changes only");
+    if (v.commit || baseSection(v.section)) return this.flash.set("notes work on staged/unstaged changes only");
     const [a, b] = this.selection() ?? [this.cursor, this.cursor];
     const range = diffs.noteRange(this.diff, a, b);
     if (!range) return this.flash.set("select some code to note (v or drag)");

@@ -12,13 +12,13 @@
 // Commands: `gitview.key:<key>`, `gitview.file:<path>`, `gitview.commit:<msg>`.
 
 import { View } from "gpui-kit";
-import { v_flex, TextareaState } from "gpui-base";
-import { focused, notify, panes, props, shared, theme } from "herdr";
+import { v_flex, InputState, ScrollHandle, TextareaState } from "gpui-base";
+import { exec, focused, notify, panes, props, shared, theme } from "herdr";
 import { Tracer, event, run } from "./telemetry.js";
 import { endTerminal, gv, labelled, message, onArgs } from "./engine.js";
 import { diffArgs, isDark, sameFile, sameShown } from "./model.js";
 import { allowed, confirmDiscard, sendNotes, takeDiscard } from "./actions.js";
-import { answer, askIn, cursorIn, handoffIn, setIgnoredDirs, handoffs, liveView, notesKey, notesOf, setHandoff, setTreeMode, setView, treeMode, viewIn } from "./shared.js";
+import { answer, askIn, basePick, cursorIn, handoffIn, setBasePick, setIgnoredDirs, handoffs, liveView, notesKey, notesOf, setHandoff, setTreeMode, setView, treeMode, viewIn } from "./shared.js";
 import { diffPane, panelDiffPanes, panelState, herdrNvimPanes } from "./layout.js";
 import { Flash, Loads, commandLoop, debounced, followStamp, stampMoved, watch } from "./modkit.js";
 import { listPlacement } from "./placement.js";
@@ -31,10 +31,19 @@ import { Scroller } from "./scroller.js";
 import { footer } from "./chrome.js";
 import { chipsFor, handleKey, runCommand, showKeys } from "./keys.js";
 import { MODES } from "./modes.js";
+import { DEFAULT_VIEW, nextView, viewById } from "./views.js";
+import { baseArgs, baseOptions, carries, loadLists, pickOf, resolveBase } from "./bases.js";
+import { SHOWN_MAX, shownBases } from "./viewbar.js";
+import { PrCache, ghFinder, lookupPr, prMark } from "./pr.js";
+import { committedStatus, filesArgs, rangeOf } from "./committed.js";
 
 // exec gives up on a program after 30 s: a commit that took that long may
 // still be running (a slow hook) or have finished.
 const EXEC_LIMIT_MS = 29000;
+
+// The `gh` command (pr.js ghFinder): the bare name, else Homebrew's places
+// (the app's PATH may lack them), found once per app run.
+const findGh = ghFinder((cmd, args) => exec(cmd, args, { timeout: 5000 }));
 
 export default class GitList extends View {
   init(_props, cx) {
@@ -60,7 +69,22 @@ export default class GitList extends View {
     this.commitInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.width = 0;
     this.mode = "files";
-    this.scope = "worktree";
+    this.viewId = DEFAULT_VIEW; // views.js: which file list (uncommitted, branch, committed)
+    // The header's menus (viewbar.js): `menu` is the one open ("view", "base").
+    // The base picker's search, its list's scroll, its highlighted row, and
+    // the lists it shows (bases.js; loaded each time it opens).
+    this.menu = null;
+    this.baseInput = InputState.new({ placeholder: "Search branches, tags, commits" });
+    this.baseInput.on("change", (_e, cx) => { this.baseAt = 0; cx.notify(); });
+    this.baseInput.on("submit", (_e, cx) => this.confirmBase(cx));
+    this.baseScroll = ScrollHandle.new();
+    this.baseAt = 0;
+    this.bases = { loading: false, error: null, refs: null, commits: [] };
+    this.defaultBase = null; // {key, label}: the engine's own base, as last seen
+    this.resolved = null; // {key, r}: the picked base as resolved last (bases.js resolveBase)
+    this.prs = new PrCache(); // the branch's pull request per repo (pr.js), asked of gh after a status
+    this.prAsking = new Set(); // repos (keys) gh is being asked about
+    this.folds = {}; // view id → Set of the sections folded in it (a click on a header)
     this.work = null; // FileList: the changed files
     this.commitFiles = null; // FileList: a commit's files (history)
     this.history = new History(false);
@@ -141,6 +165,16 @@ export default class GitList extends View {
     return this.place.tab(this.ctx);
   }
 
+  // The view (views.js) the list shows: its entry of VIEWS.
+  viewDef() {
+    return viewById(this.viewId);
+  }
+
+  // The engine's scope for it.
+  get scope() {
+    return this.viewDef().scope;
+  }
+
   // The file list the shown view acts on (none in history and notes).
   list() {
     return MODES[this.mode].list(this);
@@ -154,7 +188,7 @@ export default class GitList extends View {
   context() {
     const loc = this.place.context(this.ctx);
     const repo = this.roots.get(`${loc.on ?? ""}:${loc.cwd}`) ?? loc.cwd;
-    return { ...loc, key: JSON.stringify([repo, loc.on, this.scope]) };
+    return { ...loc, key: JSON.stringify([repo, loc.on, this.viewId]) };
   }
 
   // Whether something notice() acts on changed (render and the timer ask;
@@ -458,9 +492,9 @@ export default class GitList extends View {
     this.select(row, cx, { line: rec?.line ?? null, focusPane: true });
   }
 
-  // The panel just showed (cmd-shift-g, the Changes button), and the tab
-  // has no diff pane (hiding it closed them): from a fresh status, the
-  // selected file, else the first one, opens there, as the TUI's toggle did.
+  // The panel just showed (cmd-shift-g, the Changes button): a fresh status,
+  // and no diff pane. A diff opens on a click on a file (or space), never
+  // on its own; the list keeps its selection.
   openOnShow(cx) {
     // A status for this place under a second old is fresh enough.
     const same = this.loadedKey === this.context().key;
@@ -471,24 +505,14 @@ export default class GitList extends View {
     // that can't any more goes.
     const rec = handoffIn(tab);
     if (rec && !this.restorable(tab, rec)) setHandoff(tab, null);
-    if (!tab || diffPane(tab) || (rec && this.restorable(tab, rec))) return;
-    // The list it kept while hidden: its file at once (the refresh corrects
-    // it if it moved meanwhile: followSelection).
-    const known = same && this.list()?.shownFile();
-    if (known) return this.select(known, cx);
-    cx.spawn(async (cx) => {
-      await this.loads.idle(cx);
-      const row = this.list()?.shownFile();
-      if (row && this.place.shown() && this.tab() === tab && !diffPane(tab)) this.select(row, cx);
-      cx.notify();
-    });
   }
 
-  // `poll`: a timer's look; in branch scope the base found last time is
+  // `poll`: a timer's look; in the Branch view the base found last time is
   // passed back (finding it is a dozen git calls), with the HEAD it was
-  // found at: the engine finds it again once HEAD moved. One status load at
-  // a time (Loads.latest); a newer ask runs after it, and a reply that
-  // isn't the newest is dropped.
+  // found at: the engine finds it again once HEAD moved. A base the person
+  // picked is not the engine's to find: loadStatus gives it every time.
+  // One status load at a time (Loads.latest); a newer ask runs after it, and
+  // a reply that isn't the newest is dropped.
   // `quiet`: the same repo again (a watch batch, a stamp, a poll): no
   // spinner.
   refresh(cx, { poll = false, quiet = poll, why = "" } = {}) {
@@ -504,17 +528,9 @@ export default class GitList extends View {
       this.statusAt = started;
       const ctx = this.ctx;
       const old = this.work;
-      const base = poll && this.scope === "branch" && this.loadedKey === ctx.key ? old?.where.base : null;
-      const known = base ? ["--base", base.label, "--merge-base", base.merge_base, ...(old.status.head ? ["--head", old.status.head] : [])] : [];
       let status;
       try {
-        // A repo whose plain status failed on a submodule (the engine said
-        // so): straight to the status that works.
-        const sub = this.noSubmodules.has(ctx.key) ? ["--ignore-submodules"] : [];
-        // A poll of a repo it knows: its root, not looked up again (--root).
-        const root = poll && this.loadedKey === ctx.key ? old?.where.root : null;
-        const repo = root ? ["--repo", root, "--root"] : ["--repo", ctx.cwd];
-        status = await gv(["status", ...repo, "--scope", this.scope, ...known, ...sub, ...onArgs(ctx.on)]);
+        status = await this.loadStatus(ctx, old, poll);
       } catch (e) {
         if (current() && ctx.key === this.ctx.key) {
           const m = message(e);
@@ -530,14 +546,14 @@ export default class GitList extends View {
       }
       if (!current() || ctx.key !== this.ctx.key) return;
       this.roots.set(`${ctx.on ?? ""}:${ctx.cwd}`, status.root);
-      if (status.ignore_submodules) this.noSubmodules.add(JSON.stringify([status.root, ctx.on ?? null, this.scope]));
+      if (status.ignore_submodules) this.noSubmodules.add(JSON.stringify([status.root, ctx.on ?? null, this.viewId]));
       // The key by repo from now on (the same list for this folder).
-      ctx.key = this.ctx.key = JSON.stringify([status.root, ctx.on ?? null, this.scope]);
+      ctx.key = this.ctx.key = JSON.stringify([status.root, ctx.on ?? null, this.viewId]);
       const where = { root: status.root, on: ctx.on ?? null, base: status.base ?? null };
       const same = old && old.where.root === where.root && old.where.on === where.on && old.status.scope === status.scope;
       if (same) old.update(status, where);
       else {
-        this.work = new FileList(status, where);
+        this.work = new FileList(status, where, (this.folds[this.viewId] ??= new Set()));
         this.work.rebuild(treeMode());
         this.commitFiles = null;
         this.setMode("files", cx);
@@ -564,7 +580,151 @@ export default class GitList extends View {
         this.toAnswer = null;
       }
       knowEditor(where.root, where.on, cx);
+      this.askPr(status, ctx.on, cx);
     }, { quiet });
+  }
+
+  // ---- the pull request (pr.js) ---------------------------------------------------
+
+  // In the Committed view of a local repo: ask gh for the branch's pull
+  // request when HEAD or the branch moved, or the answer is minutes old. It
+  // runs after the list is shown; when its answer is not the base the shown
+  // list used (a PR appeared or went, its base moved, the list was built on
+  // the old branch's PR), the list loads again. No gh, not logged in, no PR:
+  // no PR, nothing said. A space on another machine: not asked.
+  askPr(status, on, cx) {
+    if (!this.viewDef().to || on || !status.root) return;
+    const key = notesKey(on, status.root);
+    if (!this.prs.due(key, status.head ?? null, status.branch ?? null) || this.prAsking.has(key)) return;
+    this.prAsking.add(key);
+    const root = status.root;
+    const head = status.head ?? null;
+    const branch = status.branch ?? null;
+    cx.spawn(async (cx) => {
+      try {
+        const run = (cmd) => (args) => exec(cmd, args, { cwd: root, timeout: 8000 });
+        const gh = await findGh();
+        const pr = gh ? await lookupPr(run(gh), run("git")) : null;
+        this.prs.set(key, { pr, head, branch });
+        // The base the list uses changes with it (a pick still wins): what
+        // the shown list used (`pr_base`, set by baseStatus), not what the
+        // cache held before, which a checkout may have left for another branch.
+        const w = this.work;
+        if (this.viewDef().to && w?.where.root === root && !w.where.on && (w.status.branch ?? null) === branch && !this.pick()) {
+          if (this.prs.changes(key, w.status)) this.refresh(cx, { quiet: true, why: "pr" });
+        }
+      } finally {
+        this.prAsking.delete(key);
+        cx.notify();
+      }
+    });
+  }
+
+  // The header's pull request mark (pr.js prMark): {number, used, unpushed}
+  // or null. `used`: its base is the one the list is against.
+  prMark() {
+    const w = this.work?.where;
+    if (!w || w.on || !this.viewDef().to) return null;
+    const pr = this.prs.get(notesKey(w.on, w.root), this.work.status.head, this.work.status.branch);
+    const mark = prMark(pr, this.work.status.head);
+    return mark && { ...mark, used: !this.pick() && this.work.status.base?.label === pr.ref };
+  }
+
+  // One status of the shown view. In a view that is against a base, with a
+  // base the person picked (bases.js; kept per repo in shared state), the
+  // base comes from git, now: its merge-base with HEAD as it is at this
+  // moment, passed with that HEAD. So a HEAD that moved (a commit, a pull, a
+  // checkout) gives a new merge-base, and the engine never finds its own base
+  // instead without saying so. It takes the three values only while `--head`
+  // is still its HEAD, and says nothing when not: a status that doesn't carry
+  // the base asked for is asked again. A pick that can't be resolved (the
+  // branch is gone) is dropped, with a message, and the default shows.
+  async loadStatus(ctx, old, poll) {
+    const status = await this.baseStatus(ctx, old, poll);
+    return this.viewDef().to ? this.committedStatus(status, ctx) : status;
+  }
+
+  // The Committed view's list (committed.js): the files of merge-base →
+  // HEAD from the engine's `commit-files`, none when HEAD is the merge-base.
+  async committedStatus(status, ctx) {
+    const range = rangeOf(status);
+    const r = range ? await gv(filesArgs(status, range, ctx.on)) : null;
+    return committedStatus(status, r?.files);
+  }
+
+  // The status of a view that is against a base, or of the working tree
+  // (loadStatus).
+  async baseStatus(ctx, old, poll) {
+    const view = this.viewDef();
+    const sameRepo = this.loadedKey === ctx.key;
+    // A repo whose plain status failed on a submodule (the engine said
+    // so): straight to the status that works.
+    const sub = this.noSubmodules.has(ctx.key) ? ["--ignore-submodules"] : [];
+    // A poll of a repo it knows: its root, not looked up again (--root).
+    const root = poll && sameRepo ? old?.where.root : null;
+    const repo = root ? ["--repo", root, "--root"] : ["--repo", ctx.cwd];
+    const ask = (known) => gv(["status", ...repo, "--scope", view.scope, ...known, ...sub, ...onArgs(ctx.on)]);
+    if (!view.usesBase) return ask([]);
+    const folder = `${ctx.on ?? ""}:${ctx.cwd}`;
+    let dropped = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const top = (sameRepo ? old?.where.root : null) ?? this.roots.get(folder) ?? null;
+      let pick = basePick(ctx.on, top);
+      // The Committed view's base, when none is picked: the open pull
+      // request's, if gh said so (pr.js; asked after a status, never here).
+      // The branch is only known from the status: its branch is checked below.
+      const viaPr = !pick && view.to && top ? this.prs.tentative(notesKey(ctx.on, top)) : null;
+      if (viaPr) pick = { ref: viaPr.ref, label: viaPr.ref };
+      if (!pick) {
+        // The engine's base: a poll hands back the one it found (not in the
+        // Committed view, where the pull request may have gone meanwhile).
+        const last = poll && sameRepo && !dropped && !view.to ? old?.where.base : null;
+        const known = last ? ["--base", last.label, "--merge-base", last.merge_base, ...(old.status.head ? ["--head", old.status.head] : [])] : [];
+        const status = await ask(known);
+        this.roots.set(folder, status.root);
+        this.defaultBase = { key: notesKey(ctx.on, status.root), label: status.base?.label ?? null };
+        // The repo wasn't known yet, and has a base picked: with it.
+        if (!top && basePick(ctx.on, status.root)) continue;
+        return status;
+      }
+      const r = await this.resolvePick(ctx.on, top, pick);
+      if (!r.ok && viaPr) {
+        // The PR's base is no ref here: the shared base, silently.
+        this.prs.markBroken(notesKey(ctx.on, top), viaPr.ref);
+        this.resolved = null;
+        continue;
+      }
+      if (!r.ok) {
+        setBasePick(ctx.on, top, null);
+        this.resolved = null;
+        dropped = true;
+        this.flash.set(`${pick.label}: ${r.why}; back to the default base`);
+        continue;
+      }
+      const status = await ask(baseArgs(pick.label, r));
+      if (!carries(status, r)) continue;
+      if (!viaPr) return status;
+      // A PR is only for the branch it was asked for: after a checkout the
+      // cache still holds the old branch's. Not this one's: without it.
+      if (this.prs.get(notesKey(ctx.on, top), status.head, status.branch)?.ref !== viaPr.ref) {
+        this.prs.drop(notesKey(ctx.on, top));
+        this.resolved = null;
+        continue;
+      }
+      return { ...status, pr_base: viaPr.ref };
+    }
+    throw new Error("HEAD keeps moving: the base is loaded again on the next change");
+  }
+
+  // A picked ref against HEAD now (bases.js resolveBase), in the repo's
+  // root on its machine; the last result saves the merge-base's call while
+  // neither HEAD nor the ref moved.
+  async resolvePick(on, root, pick) {
+    const key = `${notesKey(on, root)}:${pick.ref}`;
+    const git = (args) => exec("git", args, { cwd: root, on: on ?? null, timeout: 15000 });
+    const r = await resolveBase(git, pick.ref, this.resolved?.key === key ? this.resolved.r : null);
+    this.resolved = r.ok ? { key, r } : null;
+    return r;
   }
 
   // After a new status: when the file the pane shows went from where it
@@ -579,7 +739,8 @@ export default class GitList extends View {
     if (!tab || !work || !MODES[this.mode].actsOnWork) return;
     const view = liveView(viewIn(tab));
     if (!view || view.commit || view.root !== work.where.root || view.on !== work.where.on) return;
-    const there = work.findFile(view.path, view.section);
+    // (Its section folded: it is there all the same, and stays folded.)
+    const there = work.findFile(view.path, view.section, { keepFolds: true });
     if (there) {
       if (!work.row()) work.select(there);
       // Its rev moved (an agent wrote to it, it was staged in part): the
@@ -689,12 +850,20 @@ export default class GitList extends View {
     else this.flash.set(`${path} has no changes`);
   }
 
+  // j/k, g/G: the selection moves; an open diff pane follows it, a closed
+  // one stays closed (a click or space opens it).
   move(delta, cx) {
-    this.select(this.list()?.step(delta), cx);
+    this.select(this.list()?.step(delta), cx, { open: false });
   }
 
   edge(last, cx) {
-    this.select(this.list()?.edge(last), cx);
+    this.select(this.list()?.edge(last), cx, { open: false });
+  }
+
+  // Space: the selected file's diff, opening the pane.
+  openDiff(cx) {
+    const row = this.list()?.row();
+    if (row?.kind === "file") this.select(row, cx);
   }
 
   // Keep list item i in view (the list starts with 6 px of padding).
@@ -762,7 +931,7 @@ export default class GitList extends View {
     const list = this.work;
     row = row ?? list?.row();
     event("list", { rowAction: op, row: row?.key ?? null, mode: this.mode, scope: this.scope });
-    if (!row || !MODES[this.mode].actsOnWork || this.scope !== "worktree") return;
+    if (!row || !MODES[this.mode].actsOnWork || !this.viewDef().actsOnWork) return;
     const section = row.section.id;
     if (!allowed(op, section)) return this.flash.set(`can't ${op} in ${row.section.title}`);
     const paths = list.filesOf(row);
@@ -830,7 +999,7 @@ export default class GitList extends View {
   commit(cx) {
     const text = this.commitInput.value().trim();
     const work = this.work;
-    if (!text || !work || this.scope !== "worktree" || this.commitRunning()) return;
+    if (!text || !work || !this.viewDef().actsOnWork || this.commitRunning()) return;
     this.committing = Date.now();
     const started = Date.now();
     this.ownOp = { at: started + 60000, paths: [] }; // its index and refs writes
@@ -858,10 +1027,142 @@ export default class GitList extends View {
     return Boolean(this.committing) && Date.now() - this.committing < EXEC_LIMIT_MS + 1000;
   }
 
-  toggleScope(cx) {
-    this.scope = this.scope === "worktree" ? "branch" : "worktree";
+  // `w`: the next view (views.js).
+  toggleView(cx) {
+    this.setView(nextView(this.viewId).id, cx);
+  }
+
+  // The header's view switch, or `w`. It loads the view's files and opens no
+  // diff pane: the pane, if there is one, follows what's left of its file
+  // (followSelection).
+  setView(id, cx) {
+    this.menu = null;
+    if (id === this.viewId) return;
+    this.viewId = viewById(id).id;
     this.setMode("files", cx);
     this.refresh(cx);
+  }
+
+  // ---- the header's menus (viewbar.js) -------------------------------------------
+
+  // The view switch ("view") or the base picker ("base") open; null: shut.
+  setMenu(menu, cx) {
+    if (menu === this.menu) return;
+    this.menu = menu;
+    if (menu === "base") this.openBases(cx);
+    cx.notify();
+  }
+
+  pickView(id, cx) {
+    this.setView(id, cx);
+    this.focusHere(cx);
+    cx.notify();
+  }
+
+  // The base picked for this repo: {ref, label}, or null (the engine's own).
+  pick() {
+    const w = this.work?.where;
+    return w ? basePick(w.on, w.root) : null;
+  }
+
+  // `status`'s base arguments for the picked base (resolved against HEAD
+  // now), or none: the history's "since the base" uses it.
+  async pickedArgs(where) {
+    const pick = basePick(where.on, where.root);
+    const r = pick ? await this.resolvePick(where.on, where.root, pick) : null;
+    return r?.ok ? baseArgs(pick.label, r) : [];
+  }
+
+  // The picker's button: the base the list is against now (the engine's
+  // when none is picked), else what is picked, else a placeholder.
+  baseLabel() {
+    return this.work?.status.base?.label ?? this.pick()?.label ?? "base";
+  }
+
+  // The picker's rows (bases.js): the default, the refs, the commits.
+  baseOptions() {
+    const w = this.work?.where;
+    const known = w && this.defaultBase?.key === notesKey(w.on, w.root) ? this.defaultBase.label : null;
+    const pr = w && this.viewDef().to && !w.on ? this.prs.get(notesKey(w.on, w.root), this.work.status.head, this.work.status.branch) : null;
+    return baseOptions({ defaultLabel: known, refs: this.bases.refs ?? [], commits: this.bases.commits, pr });
+  }
+
+  // The picker opened: an empty search with the keyboard in it, and the
+  // lists from git in the repo's root, on its machine (`exec`'s `on`, as the
+  // engine's `--on`). The default's name is only known once a status
+  // came without a pick: when it is not, one is asked for.
+  openBases(cx) {
+    const where = this.work?.where;
+    this.baseInput.set_value("");
+    this.baseAt = 0;
+    this.baseInput.focus();
+    cx.timer.after(60, () => { if (this.menu === "base") this.baseInput.focus(); });
+    if (!where) {
+      this.bases = { loading: false, error: "No repository yet", refs: null, commits: [] };
+      return;
+    }
+    this.bases = { loading: true, error: null, refs: null, commits: [] };
+    const git = (args) => exec("git", args, { cwd: where.root, on: where.on ?? null, timeout: 15000 });
+    cx.spawn(async (cx) => {
+      try {
+        const { refs, commits } = await loadLists(git);
+        this.bases = { loading: false, error: null, refs, commits };
+      } catch (e) {
+        this.bases = { loading: false, error: message(e), refs: null, commits: [] };
+      }
+      cx.notify();
+      const key = notesKey(where.on, where.root);
+      if (this.defaultBase?.key === key && this.defaultBase.label) return;
+      try {
+        const s = await gv(["status", "--repo", where.root, "--root", "--scope", "branch", ...onArgs(where.on)]);
+        this.defaultBase = { key, label: s.base?.label ?? null };
+      } catch {
+        // the row just says "default"
+      }
+      cx.notify();
+    });
+  }
+
+  // Up and down in the open picker (the search keeps the other keys; Enter
+  // is its `submit`, Escape the Popover's).
+  baseKey(e, cx) {
+    if (e.key !== "down" && e.key !== "up") return;
+    const n = Math.min(shownBases(this).length, SHOWN_MAX);
+    if (n) {
+      this.baseAt = Math.min(n - 1, Math.max(0, this.baseAt + (e.key === "down" ? 1 : -1)));
+      this.baseScroll.scroll_to_item(this.baseAt);
+    }
+    cx.stop_propagation();
+    cx.notify();
+  }
+
+  confirmBase(cx) {
+    const option = shownBases(this)[this.baseAt];
+    if (option) this.pickBase(option, cx);
+  }
+
+  // A row picked. The default clears the stored pick. A ref is looked up
+  // first (bases.js: a commit, and its merge-base with HEAD): one that fails
+  // says why in the footer and the old base stays. Then the list loads against
+  // it; no diff pane opens (followSelection).
+  pickBase(option, cx) {
+    const where = this.work?.where;
+    this.menu = null;
+    this.focusHere(cx);
+    cx.notify();
+    if (!where) return;
+    const pick = pickOf(option);
+    if (!pick) {
+      setBasePick(where.on, where.root, null);
+      this.resolved = null;
+      return this.refresh(cx);
+    }
+    this.loads.run(cx, "base", async (cx) => {
+      const r = await this.resolvePick(where.on, where.root, pick);
+      if (!r.ok) return this.flash.set(`can't compare against ${pick.label}: ${r.why}`);
+      setBasePick(where.on, where.root, pick);
+      this.refresh(cx);
+    });
   }
 
   // The one way the view changes: the mode's `enter` runs (modes.js) when
@@ -920,7 +1221,13 @@ export default class GitList extends View {
     this.tr.line("input", { click: row.key, count: e.click_count ?? 1, mode: this.mode, scope: this.scope });
     this.focusHere(cx);
     const list = this.list();
-    if (!list || row.kind === "header") return;
+    if (!list) return;
+    // A section's header folds it (its rows hide, its count stays).
+    if (row.kind === "header") {
+      list.toggleSection(row.section.id);
+      cx.notify();
+      return;
+    }
     if (row.kind === "dir") {
       list.select(row);
       list.toggleFold(row);
@@ -1002,6 +1309,7 @@ export default class GitList extends View {
         cx.notify();
       })
       .on_key_down((e, cx) => {
+        if (this.menu) return; // an open menu (viewbar.js) has the keys
         if (this.typing) {
           if (e.key !== "escape") return;
           this.handle.focus(); // esc leaves the commit message

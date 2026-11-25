@@ -83,6 +83,8 @@ fn main() {
             kind: ChangeKind::Untracked,
             commit: None,
             base: None,
+            to_head: false,
+            head_sha: None,
         };
         app.begin_show(req.clone());
         app.apply_diff(

@@ -345,8 +345,13 @@ fn sources(req: &ShowReq) -> Result<(Source, Source), String> {
         return Ok((rev(&format!("{sha}^"), &old_path), rev(sha, &path)));
     }
     Ok(match req.scope {
-        // The list resolved the base; its merge-base is the old side.
+        // The list resolved the base; its merge-base is the old side. The
+        // new side is the working tree, or HEAD for the branch's commits.
         Scope::Branch => match &req.base {
+            Some(base) if req.to_head => (
+                rev(&base.merge_base, &old_path),
+                rev(req.head_sha.as_deref().unwrap_or("HEAD"), &path),
+            ),
             Some(base) => (rev(&base.merge_base, &old_path), worktree),
             None => return Err("branch base not resolved".to_string()),
         },

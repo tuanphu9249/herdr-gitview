@@ -19,14 +19,15 @@ export class History {
     this.loading = false;
   }
 
-  // where: the working tree's {root, on, base}.
-  async load(where) {
+  // where: the working tree's {root, on, base}; `baseArgs()`: the base the
+  // person picked, as status's arguments (none: the engine's own).
+  async load(where, baseArgs = async () => []) {
     this.loading = true;
     try {
       const args = ["log", "--repo", where.root, "--root", "--limit", "200", ...onArgs(where.on)];
       if (this.filter) {
         let base = where.base?.merge_base;
-        if (!base) base = (await gv(["status", "--repo", where.root, "--scope", "branch", ...onArgs(where.on)])).base?.merge_base;
+        if (!base) base = (await gv(["status", "--repo", where.root, "--scope", "branch", ...(await baseArgs()), ...onArgs(where.on)])).base?.merge_base;
         if (base) args.push("--merge-base", base);
         else this.filter = false;
       }
@@ -55,13 +56,13 @@ export class History {
 // ---- what the list does in it (v: the list's view) ---------------------
 
 export function openLog(v, cx) {
-  v.setMode("log", cx, { history: new History(v.scope === "branch") });
+  v.setMode("log", cx, { history: new History(v.viewDef().usesBase) });
 }
 
 export function loadLog(v, cx) {
   const where = v.work?.where;
   const history = v.history;
-  if (where) v.loads.run(cx, "log", () => history.load(where));
+  if (where) v.loads.run(cx, "log", () => history.load(where, () => v.pickedArgs(where)));
 }
 
 export function toggleLogFilter(v, cx) {

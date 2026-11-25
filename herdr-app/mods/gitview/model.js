@@ -4,15 +4,18 @@
 // and gitview-diff (linked; install copies it).
 
 // Section headers, folders and files as one list.
-// - header: {kind: "header", key: "h:<section>", section}
+// - header: {kind: "header", key: "h:<section>", section, folded}
 // - dir: {kind: "dir", key: "d:<section>:<path>/", section, path, name, depth, collapsed, count}
 // - file: {kind: "file", key: "<section>:<path>", section, file, depth}
 // `tree`: folders as rows (single-folder chains folded into one, like the
-// TUI's tree); `collapsed`: dir keys whose contents are hidden.
-export function listRows(status, { tree = false, collapsed = new Set() } = {}) {
+// TUI's tree); `collapsed`: dir keys whose contents are hidden; `folded`:
+// ids of the sections whose rows are hidden (a header stays, with its count).
+export function listRows(status, { tree = false, collapsed = new Set(), folded = new Set() } = {}) {
   const out = [];
   for (const section of status?.sections ?? []) {
-    if (section.title) out.push({ kind: "header", key: `h:${section.id}`, section });
+    const hide = Boolean(section.title) && folded.has(section.id);
+    if (section.title) out.push({ kind: "header", key: `h:${section.id}`, section, folded: hide });
+    if (hide) continue;
     if (!tree) {
       for (const file of section.files) out.push({ kind: "file", key: `${section.id}:${file.path}`, section, file, depth: 0 });
       continue;
@@ -75,9 +78,15 @@ export function parentDirs(row) {
   return out;
 }
 
+// The sections that show a change against a base, not the working tree's:
+// the Branch view's (base → working tree) and the Committed view's (base →
+// HEAD). No stage, unstage or discard in them, and no notes.
+export const baseSection = (section) => section === "branch" || section === "committed";
+
 // The pane header's scope tag.
 function scopeLabel(entry, where) {
   if (where.commit) return `commit ${where.short}`;
+  if (entry.section === "committed") return `committed vs ${where.base?.label ?? "base"}`;
   if (entry.section === "branch") return `vs ${where.base?.label ?? "base"}`;
   return entry.cached ? "staged" : "uncommitted";
 }
@@ -119,7 +128,11 @@ export function viewOf(entry, where) {
   return {
     root: where.root,
     on: where.on ?? null,
-    base: entry.section === "branch" ? where.base ?? null : null,
+    base: baseSection(entry.section) ? where.base ?? null : null,
+    // The new side: HEAD in the Committed view (the engine's `--to head`),
+    // the HEAD the list was built from (its files' `rev`), not the live one.
+    to: entry.section === "committed" ? "head" : null,
+    head: entry.section === "committed" ? entry.rev ?? null : null,
     commit: where.commit ?? null,
     short: where.short ?? null,
     ...entry,
@@ -133,7 +146,10 @@ export const sameFile = (a, b) =>
 
 // The same file shown the same way: what the pane shows of it (its rev,
 // counts, kind, side, scope) unchanged too.
-export const sameShown = (a, b) => sameFile(a, b) && ["rev", "add", "del", "kind", "letter", "cached", "scope"].every((k) => a[k] === b[k]);
+// A picked base's merge-base moves with HEAD: the same file against another one is another diff.
+// (In the Committed view the files' rev is HEAD's sha, so a new HEAD reloads too.)
+export const sameShown = (a, b) =>
+  sameFile(a, b) && ["rev", "add", "del", "kind", "letter", "cached", "scope"].every((k) => a[k] === b[k]) && (a.base?.merge_base ?? null) === (b.base?.merge_base ?? null);
 
 // `herdr-gitview json diff` arguments for a view.
 // `unless`: the hash of the rows shown now (the reply is {same} when they'd
@@ -144,6 +160,8 @@ export function diffArgs(view, { dark, unfold, unless = null }) {
   if (view.orig) args.push("--orig", view.orig);
   if (view.cached) args.push("--cached");
   if (view.base) args.push("--merge-base", view.base.merge_base, "--base", view.base.label);
+  if (view.to) args.push("--to", view.to);
+  if (view.to && view.head) args.push("--head", view.head);
   if (view.commit) args.push("--commit", view.commit);
   if (unfold) args.push("--unfold");
   if (unless) args.push("--unless", unless);

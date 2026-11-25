@@ -89,12 +89,12 @@ function bar(t) {
   return h_flex().h(HEADER_H).flex_none().pl(14).pr(8).gap(8).items_center().border_b(1).border_color(t.border);
 }
 
-// The changed files: {status, files, notes, loading, wide, tree, onNotes, onTree, onLog}.
+// The changed files: {status, files, notes, loading, wide, control, tree, onNotes, onTree, onLog}.
+// `control`: the view switch and the base picker (viewbar.js), in front of the branch.
 export function filesHeader(t, h) {
   const s = h.status;
-  const what = !s ? "gitview" : s.scope === "branch" ? `vs ${s.base?.label ?? "base"}` : "uncommitted";
   return bar(t)
-    .child(div().flex_none().font_semibold().child(what))
+    .child(h.control ?? div().flex_none().font_semibold().child(s ? "changes" : "gitview"))
     .child(
       h_flex()
         .flex_1()
