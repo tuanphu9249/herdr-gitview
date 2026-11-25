@@ -6,6 +6,13 @@
 
 import { div } from "gpui-kit";
 import { v_flex } from "gpui-base";
+import { settings } from "herdr";
+
+// Sizes from on_size_change and event positions and deltas are window px;
+// the rows are in the px a script writes. At an app zoom other than 1 they
+// differ (gpui-kit.d.ts, "divide them by settings().zoom"): unconverted, the
+// list filled only `zoom` of its height at zoom 0.8.
+const zoom = () => { const z = Number(settings()?.zoom); return Number.isFinite(z) && z > 0 ? z : 1; };
 
 const BAR = 6;
 
@@ -94,21 +101,22 @@ export class Scroller {
       .w_full()
       .overflow_hidden()
       .on_size_change((size, cx) => {
-        if (size.height === this.height) return;
-        this.height = size.height;
+        const height = size.height / zoom();
+        if (height === this.height) return;
+        this.height = height;
         this.clamp();
         cx.notify();
       })
       .on_scroll_wheel((e, cx) => {
         const before = this.top;
-        this.top -= e.delta.y;
+        this.top -= e.delta.y / zoom();
         this.clamp();
         if (this.top !== before) cx.notify();
       })
       .on_mouse_move((e, cx) => {
         if (!this.dragging) return;
         const d = this.dragging;
-        this.top = d.top + ((e.position.y - d.y) * (total - this.height)) / Math.max(1, this.height - thumb);
+        this.top = d.top + (((e.position.y - d.y) / zoom()) * (total - this.height)) / Math.max(1, this.height - thumb);
         this.clamp();
         cx.notify();
       })

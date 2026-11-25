@@ -13,7 +13,7 @@
 
 import { View } from "gpui-kit";
 import { v_flex, InputState, ScrollHandle, TextareaState } from "gpui-base";
-import { exec, focused, notify, panes, props, shared, theme } from "herdr";
+import { exec, focused, notify, panes, props, settings, shared, theme } from "herdr";
 import { Tracer, event, run } from "./telemetry.js";
 import { endTerminal, gv, labelled, message, onArgs } from "./engine.js";
 import { diffArgs, isDark, sameFile, sameShown } from "./model.js";
@@ -1304,8 +1304,11 @@ export default class GitList extends View {
       .track_focus(this.handle)
       .on_mouse_down("left", (_e, cx) => { this.focusHere(cx); cx.notify(); })
       .on_size_change((size, cx) => {
-        if (size.width === this.width) return;
-        this.width = size.width;
+        // Window px into the px the header's limits are written in (see scroller.js).
+        const z = Number(settings()?.zoom);
+        const width = size.width / (Number.isFinite(z) && z > 0 ? z : 1);
+        if (width === this.width) return;
+        this.width = width;
         cx.notify();
       })
       .on_key_down((e, cx) => {
