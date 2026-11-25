@@ -81,7 +81,7 @@ function baseRow(t, o, i, v, pick) {
     .child(check(t, current))
     .child(div().flex_none().max_w(150).truncate().text_color(t.foreground).when(o.kind === "commit", (e) => e.font_family(MONO)).child(o.label))
     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(o.detail ?? ""))
-    .child(pill(t, o.tag ?? o.kind, { accent: o.kind === "default" || o.kind === "pr" }));
+    .child(pill(t, o.kind, { accent: o.kind === "default" }));
 }
 
 // The base picker: the base's label; its menu is the search and the list.
@@ -120,22 +120,15 @@ function basePicker(v, t, pick) {
     ));
 }
 
-// A small mark with a tooltip.
-const mark = (t, id, text, tip, opts = {}) => div().id(id).flex_none().tooltip(tip).child(pill(t, text, opts));
-
-// What takes the place of the header's "uncommitted" / "vs <base>" text. In
-// the Committed view with a pull request: `#<number>` next to its base (when
-// that is the base in use), and "unpushed" when HEAD is not the PR's head.
+// What takes the place of the header's "uncommitted" / "vs <base>" text: the
+// view switch, and the base picker in the views that are against a base.
 export function viewControls(v, t) {
   const pick = v.pick();
-  const pr = v.viewDef().to ? v.prMark() : null;
   return h_flex()
     .flex_shrink(1)
     .min_w(0)
     .gap(4)
     .items_center()
     .child(viewSwitch(v, t))
-    .when(v.viewDef().usesBase, (e) => e.child(basePicker(v, t, pick)))
-    .when(Boolean(pr?.used), (e) => e.child(mark(t, "gitview-pr", `#${pr.number}`, `Pull request #${pr.number}: its base branch is the base`, { accent: true })))
-    .when(Boolean(pr?.unpushed), (e) => e.child(mark(t, "gitview-unpushed", "unpushed", "HEAD differs from the pull request's head: the diff is against HEAD here")));
+    .when(v.viewDef().usesBase, (e) => e.child(basePicker(v, t, pick)));
 }

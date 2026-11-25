@@ -68,14 +68,11 @@ test("the picker's rows: the default first, then branches, remotes, tags, commit
   assert.equal(baseOptions({})[0].label, "default"); // not known yet
 });
 
-test("the picker with a pull request: its base takes the default's place, marked PR #n, and clears the pick", () => {
-  const options = baseOptions({ defaultLabel: "origin/main", refs: parseRefs(REFS), pr: { number: 12, ref: "origin/develop" } });
-  assert.deepEqual(options.map((o) => o.kind).slice(0, 2), ["pr", "branch"]);
-  assert.deepEqual([options[0].label, options[0].tag], ["origin/develop", "PR #12"]);
+test("the default row is the current one with no pick and clears the pick; a hand-picked ref is current on its own row", () => {
+  const options = baseOptions({ defaultLabel: "origin/main", refs: parseRefs(REFS) });
   assert.equal(pickOf(options[0]), null);
   assert.equal(isCurrent(options[0], null), true);
   assert.equal(isCurrent(options[0], { ref: "refs/heads/main", label: "main" }), false);
-  // A hand-picked ref is current on its own row, not the PR's.
   const main = options.find((o) => o.label === "main");
   assert.equal(isCurrent(main, { ref: "refs/heads/main", label: "main" }), true);
 });

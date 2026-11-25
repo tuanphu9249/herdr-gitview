@@ -34,16 +34,11 @@ import { MODES } from "./modes.js";
 import { DEFAULT_VIEW, nextView, viewById } from "./views.js";
 import { baseArgs, baseOptions, carries, loadLists, pickOf, resolveBase } from "./bases.js";
 import { SHOWN_MAX, shownBases } from "./viewbar.js";
-import { PrCache, ghFinder, lookupPr, prMark } from "./pr.js";
 import { committedStatus, filesArgs, rangeOf } from "./committed.js";
 
 // exec gives up on a program after 30 s: a commit that took that long may
 // still be running (a slow hook) or have finished.
 const EXEC_LIMIT_MS = 29000;
-
-// The `gh` command (pr.js ghFinder): the bare name, else Homebrew's places
-// (the app's PATH may lack them), found once per app run.
-const findGh = ghFinder((cmd, args) => exec(cmd, args, { timeout: 5000 }));
 
 export default class GitList extends View {
   init(_props, cx) {
@@ -82,8 +77,6 @@ export default class GitList extends View {
     this.bases = { loading: false, error: null, refs: null, commits: [] };
     this.defaultBase = null; // {key, label}: the engine's own base, as last seen
     this.resolved = null; // {key, r}: the picked base as resolved last (bases.js resolveBase)
-    this.prs = new PrCache(); // the branch's pull request per repo (pr.js), asked of gh after a status
-    this.prAsking = new Set(); // repos (keys) gh is being asked about
     this.folds = {}; // view id → Set of the sections folded in it (a click on a header)
     this.work = null; // FileList: the changed files
     this.commitFiles = null; // FileList: a commit's files (history)
@@ -580,54 +573,7 @@ export default class GitList extends View {
         this.toAnswer = null;
       }
       knowEditor(where.root, where.on, cx);
-      this.askPr(status, ctx.on, cx);
     }, { quiet });
-  }
-
-  // ---- the pull request (pr.js) ---------------------------------------------------
-
-  // In the Committed view of a local repo: ask gh for the branch's pull
-  // request when HEAD or the branch moved, or the answer is minutes old. It
-  // runs after the list is shown; when its answer is not the base the shown
-  // list used (a PR appeared or went, its base moved, the list was built on
-  // the old branch's PR), the list loads again. No gh, not logged in, no PR:
-  // no PR, nothing said. A space on another machine: not asked.
-  askPr(status, on, cx) {
-    if (!this.viewDef().to || on || !status.root) return;
-    const key = notesKey(on, status.root);
-    if (!this.prs.due(key, status.head ?? null, status.branch ?? null) || this.prAsking.has(key)) return;
-    this.prAsking.add(key);
-    const root = status.root;
-    const head = status.head ?? null;
-    const branch = status.branch ?? null;
-    cx.spawn(async (cx) => {
-      try {
-        const run = (cmd) => (args) => exec(cmd, args, { cwd: root, timeout: 8000 });
-        const gh = await findGh();
-        const pr = gh ? await lookupPr(run(gh), run("git")) : null;
-        this.prs.set(key, { pr, head, branch });
-        // The base the list uses changes with it (a pick still wins): what
-        // the shown list used (`pr_base`, set by baseStatus), not what the
-        // cache held before, which a checkout may have left for another branch.
-        const w = this.work;
-        if (this.viewDef().to && w?.where.root === root && !w.where.on && (w.status.branch ?? null) === branch && !this.pick()) {
-          if (this.prs.changes(key, w.status)) this.refresh(cx, { quiet: true, why: "pr" });
-        }
-      } finally {
-        this.prAsking.delete(key);
-        cx.notify();
-      }
-    });
-  }
-
-  // The header's pull request mark (pr.js prMark): {number, used, unpushed}
-  // or null. `used`: its base is the one the list is against.
-  prMark() {
-    const w = this.work?.where;
-    if (!w || w.on || !this.viewDef().to) return null;
-    const pr = this.prs.get(notesKey(w.on, w.root), this.work.status.head, this.work.status.branch);
-    const mark = prMark(pr, this.work.status.head);
-    return mark && { ...mark, used: !this.pick() && this.work.status.base?.label === pr.ref };
   }
 
   // One status of the shown view. In a view that is against a base, with a
@@ -669,16 +615,10 @@ export default class GitList extends View {
     let dropped = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       const top = (sameRepo ? old?.where.root : null) ?? this.roots.get(folder) ?? null;
-      let pick = basePick(ctx.on, top);
-      // The Committed view's base, when none is picked: the open pull
-      // request's, if gh said so (pr.js; asked after a status, never here).
-      // The branch is only known from the status: its branch is checked below.
-      const viaPr = !pick && view.to && top ? this.prs.tentative(notesKey(ctx.on, top)) : null;
-      if (viaPr) pick = { ref: viaPr.ref, label: viaPr.ref };
+      const pick = basePick(ctx.on, top);
       if (!pick) {
-        // The engine's base: a poll hands back the one it found (not in the
-        // Committed view, where the pull request may have gone meanwhile).
-        const last = poll && sameRepo && !dropped && !view.to ? old?.where.base : null;
+        // The engine's base: a poll hands back the one it found.
+        const last = poll && sameRepo && !dropped ? old?.where.base : null;
         const known = last ? ["--base", last.label, "--merge-base", last.merge_base, ...(old.status.head ? ["--head", old.status.head] : [])] : [];
         const status = await ask(known);
         this.roots.set(folder, status.root);
@@ -688,12 +628,6 @@ export default class GitList extends View {
         return status;
       }
       const r = await this.resolvePick(ctx.on, top, pick);
-      if (!r.ok && viaPr) {
-        // The PR's base is no ref here: the shared base, silently.
-        this.prs.markBroken(notesKey(ctx.on, top), viaPr.ref);
-        this.resolved = null;
-        continue;
-      }
       if (!r.ok) {
         setBasePick(ctx.on, top, null);
         this.resolved = null;
@@ -703,15 +637,7 @@ export default class GitList extends View {
       }
       const status = await ask(baseArgs(pick.label, r));
       if (!carries(status, r)) continue;
-      if (!viaPr) return status;
-      // A PR is only for the branch it was asked for: after a checkout the
-      // cache still holds the old branch's. Not this one's: without it.
-      if (this.prs.get(notesKey(ctx.on, top), status.head, status.branch)?.ref !== viaPr.ref) {
-        this.prs.drop(notesKey(ctx.on, top));
-        this.resolved = null;
-        continue;
-      }
-      return { ...status, pr_base: viaPr.ref };
+      return status;
     }
     throw new Error("HEAD keeps moving: the base is loaded again on the next change");
   }
@@ -1083,8 +1009,7 @@ export default class GitList extends View {
   baseOptions() {
     const w = this.work?.where;
     const known = w && this.defaultBase?.key === notesKey(w.on, w.root) ? this.defaultBase.label : null;
-    const pr = w && this.viewDef().to && !w.on ? this.prs.get(notesKey(w.on, w.root), this.work.status.head, this.work.status.branch) : null;
-    return baseOptions({ defaultLabel: known, refs: this.bases.refs ?? [], commits: this.bases.commits, pr });
+    return baseOptions({ defaultLabel: known, refs: this.bases.refs ?? [], commits: this.bases.commits });
   }
 
   // The picker opened: an empty search with the keyboard in it, and the

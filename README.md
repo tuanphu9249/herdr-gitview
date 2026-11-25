@@ -50,8 +50,8 @@ line you're on. You never leave Herdr.
   committed or not) and **Committed** (the commits only, as a reviewer sees
   them). Branch and Committed compare against a base you pick (`b`, or the
   base label): the default branch, any branch, tag or recent commit, kept
-  per repo. With an open pull request, Committed uses the PR's base and
-  shows `#n` (needs `gh`).
+  per repo. The base is the default branch's merge-base unless you pick
+  another with `b`.
 - **Opens no diff on its own** (this fork) - showing the panel or moving
   with `j`/`k` opens nothing. A click on a file or `space` opens the diff;
   an open diff pane follows the selection. A click on a section header

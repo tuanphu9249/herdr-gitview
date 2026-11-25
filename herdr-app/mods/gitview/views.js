@@ -8,8 +8,7 @@
 //   usesBase    it is "against a base": the base picker shows
 //   to          the new side of its diffs: null (the working tree) or "head"
 //               (the engine's `diff --to head`: committed changes only; the
-//               file list is then `commit-files --sha "<mb>..<HEAD>"`, and a
-//               pull request's base is its default base)
+//               file list is then `commit-files --sha "<mb>..<HEAD>"`)
 
 export const VIEWS = [
   { id: "uncommitted", title: "Uncommitted", scope: "worktree", actsOnWork: true, usesBase: false, to: null },

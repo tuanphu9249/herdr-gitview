@@ -47,14 +47,10 @@ export function parseLog(text) {
 }
 
 // The picker's rows: the engine's default first (`defaultLabel` may be
-// unknown yet), then branches, remote branches, tags, the commits. `pr`
-// ({number, ref}, in the Committed view when the branch has an open pull
-// request): its base takes the default's place as the row that clears the
-// pick, marked "PR #n".
-export function baseOptions({ defaultLabel = null, refs = [], commits = [], pr = null }) {
-  const first = pr
-    ? { kind: "pr", ref: null, label: pr.ref, detail: `base of the pull request`, tag: `PR #${pr.number}` }
-    : { kind: "default", ref: null, label: defaultLabel ?? "default", detail: defaultLabel ? "default" : "the engine's choice" };
+// unknown yet; the row that clears the pick), then branches, remote branches,
+// tags, the commits.
+export function baseOptions({ defaultLabel = null, refs = [], commits = [] }) {
+  const first = { kind: "default", ref: null, label: defaultLabel ?? "default", detail: defaultLabel ? "default" : "the engine's choice" };
   return [first, ...refs, ...commits];
 }
 
@@ -69,11 +65,10 @@ export function filterOptions(options, query) {
 }
 
 // Whether the picker row is the stored pick (`pick` null: the default row).
-export const isCurrent = (option, pick) => (pick ? option.ref === pick.ref : option.kind === "default" || option.kind === "pr");
+export const isCurrent = (option, pick) => (pick ? option.ref === pick.ref : option.kind === "default");
 
-// The stored pick for a row: {ref, label}; null for the default and the PR's
-// base (clears it).
-export const pickOf = (option) => (option.kind === "default" || option.kind === "pr" ? null : { ref: option.ref, label: option.label });
+// The stored pick for a row: {ref, label}; null for the default (clears it).
+export const pickOf = (option) => (option.kind === "default" ? null : { ref: option.ref, label: option.label });
 
 // The lists, from git in the repo: one call for the refs, one for the log.
 export async function loadLists(git) {
